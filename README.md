@@ -1,28 +1,42 @@
 # RelayCheck Scenario Runner
 
-NestJS worker. Consumes versioned run jobs from RabbitMQ, executes bounded
-scenario deliveries against the configured local demo receiver, records
-attempt evidence, evaluates assertions, and finalizes runs.
+NestJS worker. Consumes versioned run jobs from RabbitMQ, claims each run
+exactly once through the Control API, executes the scenario, and reports
+lifecycle/evidence through the Control API's authenticated internal
+endpoints. It never connects to the PostgreSQL platform or demo databases.
 
-Ownership boundaries (see `ARCHITECTURE.md` at the workspace root):
+Status: lifecycle engine implemented and verified (2026-10-20). The
+`duplicate_delivery` execution logic lands in the next task; a scenario
+without a registered executor finalizes as `error` — the runner fails
+loudly and never fakes a pass.
 
-- Owns execution logic only: bounded delivery, timing, assertions, and
-  duplicate-job protection.
-- Submits lifecycle updates, attempt records, and assertion results through
-  private authenticated Control API endpoints.
-- Does not connect to the platform database and never touches Demo Receiver
-  tables; it uses the receiver's HTTP webhook and test-oracle endpoints only.
-- Deliveries target the fixed configured local demo receiver only.
+## Lifecycle
 
-Status: workspace initialized (T001). Implementation starts at T030.
-Tasks and acceptance criteria live in `TASKS.md` at the workspace root.
+1. Consume `relaycheck.run.jobs` (durable queue, prefetch 1).
+2. Validate the job at the worker boundary (`schemaVersion: 1`, run ID,
+   scenario, bounded params). Malformed messages are discarded without
+   requeue — no poison-message loops.
+3. Claim via `POST /api/internal/runs/:id/claim`: `queued → running` happens
+   exactly once. HTTP 409 means another worker already owns the run, so the
+   duplicate job is acknowledged and ignored.
+4. Run the scenario executor, reporting attempts/assertions through the
+   Control API.
+5. Finalize: `passed`/`failed` for assertion outcomes, `error` when
+   execution itself could not complete reliably.
+
+## Configuration
+
+See `.env.example`: `AMQP_URL`, `CONTROL_API_URL`, `INTERNAL_API_TOKEN`.
+The fixed demo receiver target is server-configured; no job or user input can
+change it.
 
 ## Commands
 
-- `npm install` - install dependencies (verified from a clean checkout).
-
-`npm run type-check`, `npm run build`, `npm run test`, and `npm run lint` are
-added when their service's phase task lands (see `TASKS.md`). No placeholder
-scripts are included, so nothing here fails silently.
+- `npm install` / `npm ci` — install dependencies.
+- `npm run lint` / `npm run type-check` — static checks.
+- `npm test` — Jest e2e suite: real RabbitMQ consumption against a fake
+  Control API, covering claim/execute/finalize, duplicate-job conflicts,
+  assertion-failure vs execution-error, and malformed-job discarding.
+- `npm run build` / `npm start` — build and run the worker.
 
 Package manager: **npm** (lockfiles are committed). Node >= 20.

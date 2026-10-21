@@ -13,6 +13,23 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+
+    env:
+      AMQP_URL: amqp://guest:guest@localhost:5672
+      CONTROL_API_URL: http://localhost:3200
+      INTERNAL_API_TOKEN: ci-internal-token
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
