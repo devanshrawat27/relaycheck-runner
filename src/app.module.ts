@@ -4,6 +4,7 @@ import { ExecutorRegistry } from './execution/executor-registry';
 import { LifecycleService } from './execution/lifecycle.service';
 import { RunJobConsumer } from './jobs/run-job.consumer';
 import { DuplicateDeliveryExecutor } from './scenarios/duplicate-delivery.executor';
+import { ReceiverFaultExecutor } from './scenarios/receiver-failure.executor';
 
 @Module({
   providers: [
@@ -12,6 +13,7 @@ import { DuplicateDeliveryExecutor } from './scenarios/duplicate-delivery.execut
     LifecycleService,
     RunJobConsumer,
     DuplicateDeliveryExecutor,
+    ReceiverFaultExecutor,
   ],
   exports: [RunJobConsumer, ExecutorRegistry],
 })

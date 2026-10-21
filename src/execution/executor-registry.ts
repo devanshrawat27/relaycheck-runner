@@ -10,6 +10,11 @@ export class ExecutorRegistry {
     this.executors.set(executor.scenario, executor);
   }
 
+  /** Register the same executor under an additional scenario identifier. */
+  registerAs(scenario: string, executor: ScenarioExecutor): void {
+    this.executors.set(scenario, executor);
+  }
+
   get(scenario: string): ScenarioExecutor | undefined {
     return this.executors.get(scenario);
   }
