@@ -5,12 +5,11 @@ exactly once through the Control API, executes the scenario, and reports
 lifecycle/evidence through the Control API's authenticated internal
 endpoints. It never connects to the PostgreSQL platform or demo databases.
 
-Status: `duplicate_delivery` execution implemented and verified (2026-10-21).
-The runner sends the same event ID three times to the fixed configured demo
-receiver and records every attempt (number, HTTP status, duration, outcome).
-The verdict (attempt-count + business-effect assertions) lands in the next
-task; until then a completed delivery pass withholds its verdict and the run
-finalizes as `error` with an explicit reason — the runner never fakes a pass.
+Status: assertion evaluation implemented and verified (2026-10-21).
+A `duplicate_delivery` run sends the same event ID three times to the fixed
+local receiver, records every attempt, and evaluates three persisted
+assertions. Live end-to-end proof: run `passed` with 3 attempts, 3 accepted
+deliveries, and `business_effect_applied_once` expected 1 / actual 1.
 
 ## Lifecycle
 
@@ -45,6 +44,17 @@ destination cannot be smuggled in through the queue.
   HTTP status, duration, and outcome (`delivered` / `error` / `timeout`).
 - Applies a bounded per-request timeout (`timeoutMs` from the validated job)
   using `AbortSignal.timeout`.
+- Evaluates and persists three assertions with expected and actual values:
+
+  | Assertion | Expected | Meaning |
+  |---|---|---|
+  | `delivery_attempt_count` | 3 | every delivery was attempted and recorded |
+  | `deliveries_accepted` | 3 | every delivery was answered with 2xx |
+  | `business_effect_applied_once` | 1 | receiver oracle reports exactly one effect |
+
+- Verdict rules: any failed assertion → run `failed`; oracle unreachable or
+  invalid → run `error`. A missing order at the oracle counts as **0**
+  effects, which is an assertion failure (the execution itself completed).
 
 ## Commands
 

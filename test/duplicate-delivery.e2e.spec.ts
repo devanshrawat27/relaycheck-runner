@@ -1,13 +1,19 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { AddressInfo } from 'net';
 import { ExecutorRegistry } from '../src/execution/executor-registry';
-import { AttemptReport, ExecutionContext } from '../src/execution/executor';
-import { DuplicateDeliveryExecutor } from '../src/scenarios/duplicate-delivery.executor';
+import { AssertionReport, AttemptReport, ExecutionContext } from '../src/execution/executor';
+import {
+  ASSERTION_ATTEMPT_COUNT,
+  ASSERTION_DELIVERIES_ACCEPTED,
+  ASSERTION_EFFECT_ONCE,
+  DuplicateDeliveryExecutor,
+} from '../src/scenarios/duplicate-delivery.executor';
 import { parseRunJob } from '../src/jobs/run-job';
 
 interface RecordedRequest {
+  method: string;
   path: string;
-  body: Record<string, unknown>;
+  body: Record<string, unknown> | null;
 }
 
 describe('duplicate_delivery executor (e2e)', () => {
@@ -17,18 +23,40 @@ describe('duplicate_delivery executor (e2e)', () => {
   let receiverUrl: string;
   let requests: RecordedRequest[];
   let attempts: AttemptReport[];
-  const behavior = { status: 201, delayMs: 0 };
+  let assertions: AssertionReport[];
+  const behavior = { status: 201, delayMs: 0, effectCount: 1, oracleStatus: 200, oracleDelayMs: 0 };
 
   function handler(req: IncomingMessage, res: ServerResponse): void {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
+      const bodyText = Buffer.concat(chunks).toString();
       requests.push({
+        method: req.method ?? '',
         path: req.url ?? '',
-        body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>,
+        body: bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : null,
       });
       res.setHeader('content-type', 'application/json');
       res.setHeader('connection', 'close');
+
+      if (req.method === 'GET' && req.url?.startsWith('/api/__test__/orders/')) {
+        const orderId = req.url.split('/').pop() ?? '';
+        const respond = (): void => {
+          res.statusCode = behavior.oracleStatus;
+          res.end(
+            behavior.oracleStatus === 200
+              ? JSON.stringify({ orderId, orderStatus: 'PAID', businessEffectCount: behavior.effectCount })
+              : JSON.stringify({ message: 'oracle failure' }),
+          );
+        };
+        if (behavior.oracleDelayMs > 0) {
+          setTimeout(respond, behavior.oracleDelayMs);
+        } else {
+          respond();
+        }
+        return;
+      }
+
       const respond = (): void => {
         res.statusCode = behavior.status;
         res.end(JSON.stringify({ accepted: true }));
@@ -41,14 +69,16 @@ describe('duplicate_delivery executor (e2e)', () => {
     });
   }
 
-  function makeContext(overrides: { timeoutMs?: number; deliveryCount?: number } = {}): ExecutionContext {
+  function makeContext(
+    overrides: { timeoutMs?: number; deliveryCount?: number; orderId?: string } = {},
+  ): ExecutionContext {
     return {
       runId: 'run_duplicate_test',
       scenario: 'duplicate_delivery',
       params: {
         eventType: 'payment.succeeded',
         eventId: 'evt_duplicate_test_1',
-        orderId: 'ord_duplicate_test_1',
+        orderId: overrides.orderId ?? 'ord_duplicate_test_1',
         deliveryCount: overrides.deliveryCount ?? 3,
         timeoutMs: overrides.timeoutMs ?? 2000,
       },
@@ -56,7 +86,9 @@ describe('duplicate_delivery executor (e2e)', () => {
         attempt: async (report) => {
           attempts.push(report);
         },
-        assertion: async () => undefined,
+        assertion: async (report) => {
+          assertions.push(report);
+        },
       },
     };
   }
@@ -79,48 +111,100 @@ describe('duplicate_delivery executor (e2e)', () => {
   beforeEach(() => {
     requests = [];
     attempts = [];
+    assertions = [];
     behavior.status = 201;
     behavior.delayMs = 0;
+    behavior.effectCount = 1;
+    behavior.oracleStatus = 200;
+    behavior.oracleDelayMs = 0;
     process.env.DEMO_RECEIVER_URL = receiverUrl;
   });
 
-  it('sends the same event ID three times and records every attempt', async () => {
-    await expect(executor().execute(makeContext())).rejects.toThrow(
-      'Assertion evaluation is not implemented yet',
-    );
+  it('passes when three same-event deliveries produce one business effect', async () => {
+    const result = await executor().execute(makeContext());
 
-    expect(requests).toHaveLength(3);
-    const eventIds = requests.map((r) => r.body.eventId);
-    expect(eventIds).toEqual(['evt_duplicate_test_1', 'evt_duplicate_test_1', 'evt_duplicate_test_1']);
-    expect(requests.every((r) => r.path === '/api/webhooks/demo')).toBe(true);
-    expect(requests[0]?.body.orderId).toBe('ord_duplicate_test_1');
-    // nothing resembling a destination is ever part of the payload
-    expect(requests.every((r) => !('destinationUrl' in r.body) && !('url' in r.body))).toBe(true);
+    expect(result.status).toBe('passed');
+    expect(result.summary).toContain('3 attempts');
 
-    expect(attempts).toHaveLength(3);
+    const deliveries = requests.filter((r) => r.method === 'POST');
+    expect(deliveries).toHaveLength(3);
+    expect(deliveries.map((r) => r.body?.eventId)).toEqual([
+      'evt_duplicate_test_1',
+      'evt_duplicate_test_1',
+      'evt_duplicate_test_1',
+    ]);
+    expect(deliveries.every((r) => r.path === '/api/webhooks/demo')).toBe(true);
+
     expect(attempts.map((a) => a.attemptNumber)).toEqual([1, 2, 3]);
-    expect(attempts.every((a) => a.eventId === 'evt_duplicate_test_1')).toBe(true);
     expect(attempts.every((a) => a.httpStatus === 201 && a.outcome === 'delivered')).toBe(true);
-    expect(attempts.every((a) => typeof a.durationMs === 'number' && a.durationMs >= 0)).toBe(true);
+
+    expect(assertions).toEqual([
+      { name: ASSERTION_ATTEMPT_COUNT, expected: '3', actual: '3', passed: true },
+      { name: ASSERTION_DELIVERIES_ACCEPTED, expected: '3', actual: '3', passed: true },
+      { name: ASSERTION_EFFECT_ONCE, expected: '1', actual: '1', passed: true },
+    ]);
   });
 
-  it('records non-2xx responses as error attempts with their status', async () => {
-    behavior.status = 500;
-    await expect(executor().execute(makeContext())).rejects.toThrow();
+  it('fails when duplicate deliveries produce more than one business effect', async () => {
+    behavior.effectCount = 3;
+    const result = await executor().execute(makeContext());
 
-    expect(attempts).toHaveLength(3);
+    expect(result.status).toBe('failed');
+    expect(result.summary).toContain(`${ASSERTION_EFFECT_ONCE} expected 1, got 3`);
+
+    const effectAssertion = assertions.find((a) => a.name === ASSERTION_EFFECT_ONCE);
+    expect(effectAssertion).toEqual({
+      name: ASSERTION_EFFECT_ONCE,
+      expected: '1',
+      actual: '3',
+      passed: false,
+    });
+    expect(assertions.find((a) => a.name === ASSERTION_ATTEMPT_COUNT)?.passed).toBe(true);
+  });
+
+  it('fails when deliveries are rejected by the receiver', async () => {
+    behavior.status = 500;
+    behavior.effectCount = 0;
+    const result = await executor().execute(makeContext());
+
+    expect(result.status).toBe('failed');
     expect(attempts.every((a) => a.outcome === 'error' && a.httpStatus === 500)).toBe(true);
-    expect(attempts[0]?.errorDetail).toContain('HTTP 500');
+    expect(assertions.find((a) => a.name === ASSERTION_DELIVERIES_ACCEPTED)).toEqual({
+      name: ASSERTION_DELIVERIES_ACCEPTED,
+      expected: '3',
+      actual: '0',
+      passed: false,
+    });
   });
 
   it('records a bounded timeout as a timeout attempt', async () => {
     behavior.delayMs = 500;
-    await expect(executor().execute(makeContext({ timeoutMs: 100 }))).rejects.toThrow();
+    behavior.effectCount = 0;
+    const result = await executor().execute(makeContext({ timeoutMs: 100 }));
 
+    expect(result.status).toBe('failed');
     expect(attempts).toHaveLength(3);
     expect(attempts.every((a) => a.outcome === 'timeout')).toBe(true);
-    expect(attempts.every((a) => a.httpStatus === undefined)).toBe(true);
     expect(attempts[0]?.errorDetail).toContain('100 ms');
+  });
+
+  it('treats a missing order at the oracle as zero effects (assertion failure, not error)', async () => {
+    behavior.status = 500;
+    behavior.oracleStatus = 404;
+    const result = await executor().execute(makeContext());
+
+    expect(result.status).toBe('failed');
+    expect(assertions.find((a) => a.name === ASSERTION_EFFECT_ONCE)).toMatchObject({
+      actual: '0',
+      passed: false,
+    });
+  });
+
+  it('throws (execution error) when the oracle is unavailable or invalid', async () => {
+    behavior.oracleStatus = 500;
+    await expect(executor().execute(makeContext())).rejects.toThrow(
+      'Receiver test oracle returned HTTP 500',
+    );
   });
 
   it('refuses to deliver to a non-local configured target', async () => {
@@ -143,14 +227,12 @@ describe('duplicate_delivery executor (e2e)', () => {
       },
     };
     expect(parseRunJob(valid)).not.toBeNull();
-
     expect(
       parseRunJob({
         ...valid,
         params: { ...valid.params, destinationUrl: 'https://evil.example.com' },
       }),
     ).toBeNull();
-
     expect(parseRunJob({ ...valid, destinationUrl: 'https://evil.example.com' })).toBeNull();
     expect(parseRunJob({ ...valid, params: { ...valid.params, url: 'https://evil.example.com' } })).toBeNull();
   });
