@@ -22,15 +22,27 @@ function isBoundedInt(value: unknown, min: number, max: number): value is number
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
 }
 
+const TOP_LEVEL_KEYS = new Set(['schemaVersion', 'runId', 'scenario', 'params']);
+const PARAM_KEYS = new Set(['eventType', 'eventId', 'orderId', 'deliveryCount', 'timeoutMs']);
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: Set<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
 /**
  * Validates a raw job message at the worker boundary. Returns null for
  * anything malformed so the consumer can discard it without requeue.
+ * Unknown keys are rejected outright — a job can never smuggle a
+ * destination URL or any other extra field.
  */
 export function parseRunJob(raw: unknown): RunJob | null {
   if (typeof raw !== 'object' || raw === null) {
     return null;
   }
   const candidate = raw as Record<string, unknown>;
+  if (!hasOnlyKeys(candidate, TOP_LEVEL_KEYS)) {
+    return null;
+  }
   if (candidate.schemaVersion !== 1) {
     return null;
   }
@@ -42,6 +54,9 @@ export function parseRunJob(raw: unknown): RunJob | null {
     return null;
   }
   const p = params as Record<string, unknown>;
+  if (!hasOnlyKeys(p, PARAM_KEYS)) {
+    return null;
+  }
   if (
     !isNonEmptyString(p.eventType) ||
     !isNonEmptyString(p.eventId) ||

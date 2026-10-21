@@ -5,10 +5,12 @@ exactly once through the Control API, executes the scenario, and reports
 lifecycle/evidence through the Control API's authenticated internal
 endpoints. It never connects to the PostgreSQL platform or demo databases.
 
-Status: lifecycle engine implemented and verified (2026-10-20). The
-`duplicate_delivery` execution logic lands in the next task; a scenario
-without a registered executor finalizes as `error` — the runner fails
-loudly and never fakes a pass.
+Status: `duplicate_delivery` execution implemented and verified (2026-10-21).
+The runner sends the same event ID three times to the fixed configured demo
+receiver and records every attempt (number, HTTP status, duration, outcome).
+The verdict (attempt-count + business-effect assertions) lands in the next
+task; until then a completed delivery pass withholds its verdict and the run
+finalizes as `error` with an explicit reason — the runner never fakes a pass.
 
 ## Lifecycle
 
@@ -26,9 +28,23 @@ loudly and never fakes a pass.
 
 ## Configuration
 
-See `.env.example`: `AMQP_URL`, `CONTROL_API_URL`, `INTERNAL_API_TOKEN`.
-The fixed demo receiver target is server-configured; no job or user input can
-change it.
+See `.env.example`: `AMQP_URL`, `CONTROL_API_URL`, `INTERNAL_API_TOKEN`,
+`DEMO_RECEIVER_URL`.
+
+`DEMO_RECEIVER_URL` defaults to `http://localhost:3100` and is validated on
+every execution: only `localhost`/`127.0.0.1` targets are accepted, so a
+misconfiguration or any job payload can never turn the runner into an
+arbitrary-URL sender. Job validation also rejects unknown fields, so a
+destination cannot be smuggled in through the queue.
+
+## duplicate_delivery scenario
+
+- Sends the SAME `eventId` `deliveryCount` times (fixed to 3 by the Control
+  API) to `POST /api/webhooks/demo` on the configured receiver.
+- Records one attempt per delivery through the Control API: attempt number,
+  HTTP status, duration, and outcome (`delivered` / `error` / `timeout`).
+- Applies a bounded per-request timeout (`timeoutMs` from the validated job)
+  using `AbortSignal.timeout`.
 
 ## Commands
 
