@@ -5,11 +5,12 @@ exactly once through the Control API, executes the scenario, and reports
 lifecycle/evidence through the Control API's authenticated internal
 endpoints. It never connects to the PostgreSQL platform or demo databases.
 
-Status: assertion evaluation implemented and verified (2026-10-21).
-A `duplicate_delivery` run sends the same event ID three times to the fixed
-local receiver, records every attempt, and evaluates three persisted
-assertions. Live end-to-end proof: run `passed` with 3 attempts, 3 accepted
-deliveries, and `business_effect_applied_once` expected 1 / actual 1.
+Status: three scenarios implemented and verified (2026-10-21):
+`duplicate_delivery`, `receiver_failure`, and `receiver_timeout`. Job
+processing is resilient: transient Control API failures are retried with a
+bounded count, permanent failures and poisoned messages go to a dead-letter
+queue, and a duplicate job for a still-running run recovers it to `error`
+rather than leaving it stuck.
 
 ## Lifecycle
 
@@ -35,6 +36,32 @@ every execution: only `localhost`/`127.0.0.1` targets are accepted, so a
 misconfiguration or any job payload can never turn the runner into an
 arbitrary-URL sender. Job validation also rejects unknown fields, so a
 destination cannot be smuggled in through the queue.
+
+## Failure handling
+
+- Transient Control API problems (network/5xx) are retried in-process
+  (bounded) and, if still failing, the job message is republished with a
+  retry header (max 5) before being dead-lettered.
+- Permanent problems (401/403/404) are dead-lettered immediately.
+- Malformed jobs go to the dead-letter queue — never a requeue loop.
+- A redelivered job whose run is still `running` finalizes it as `error`
+  ("Execution was interrupted before completion") so no run stays stuck.
+- A redelivered job for a finished/deleted run is acknowledged and ignored.
+
+Queues: `relaycheck.run.jobs` (work) and `relaycheck.run.jobs.dlq`
+(poison/exhausted).
+
+## Scenarios
+
+| Scenario | Behaviour |
+|---|---|
+| `duplicate_delivery` | 3 deliveries of one event ID; expects 3 attempts and exactly 1 business effect |
+| `receiver_failure` | injects a test-only 503; expects that status and **no** business effect |
+| `receiver_timeout` | injects a delay beyond the client timeout; expects a recorded timeout attempt |
+
+Failure/timeout scenarios require the receiver to run with
+`RELAYCHECK_TEST_MODE=true`; otherwise the run ends as `error` (fail closed).
+The executor clears any injected fault afterwards.
 
 ## duplicate_delivery scenario
 
