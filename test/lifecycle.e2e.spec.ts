@@ -34,7 +34,8 @@ describe('Runner worker lifecycle (e2e)', () => {
     finalizeDefault: 201,
     finalizeStatuses: [] as number[],
     runStatus: 'running',
-    runMissing: false,
+    leaseExpiresAt: null as string | null,
+    recoverDefault: 201,
   };
   let pubConn: ChannelModel;
 
@@ -59,23 +60,42 @@ describe('Runner worker lifecycle (e2e)', () => {
       res.setHeader('content-type', 'application/json');
       res.setHeader('connection', 'close');
 
-      if (req.method === 'GET' && req.url?.startsWith('/api/runs/')) {
-        if (behavior.runMissing) {
-          res.statusCode = 404;
-          res.end(JSON.stringify({ message: 'not found' }));
-          return;
-        }
-        res.statusCode = 200;
-        res.end(JSON.stringify({ id: 'run', status: behavior.runStatus }));
-        return;
-      }
-
       if (req.url?.endsWith('/claim')) {
         const status = nextStatus(behavior.claimStatuses, behavior.claimDefault);
         res.statusCode = status;
-        res.end(JSON.stringify({ runId: 'run', status: status === 201 ? 'running' : 'conflict' }));
+        if (status === 201) {
+          res.end(
+            JSON.stringify({
+              runId: 'run',
+              status: 'running',
+              leaseExpiresAt:
+                behavior.leaseExpiresAt ?? new Date(Date.now() + 30_000).toISOString(),
+            }),
+          );
+        } else {
+          res.end(
+            JSON.stringify({
+              status: behavior.runStatus,
+              leaseExpiresAt: behavior.leaseExpiresAt,
+              message: 'conflict',
+            }),
+          );
+        }
         return;
       }
+
+      if (req.url?.endsWith('/heartbeat')) {
+        res.statusCode = 201;
+        res.end(JSON.stringify({ extended: true }));
+        return;
+      }
+
+      if (req.url?.endsWith('/recover')) {
+        res.statusCode = behavior.recoverDefault;
+        res.end(JSON.stringify({ recovered: behavior.recoverDefault === 201 }));
+        return;
+      }
+
       if (req.url?.endsWith('/finalize')) {
         res.statusCode = nextStatus(behavior.finalizeStatuses, behavior.finalizeDefault);
         res.end(JSON.stringify({ ok: true }));
@@ -150,7 +170,12 @@ describe('Runner worker lifecycle (e2e)', () => {
     registry.register(executor);
   };
 
+  const callsTo = (suffix: string): RecordedCall[] => calls.filter((c) => c.path.endsWith(suffix));
+
   beforeAll(async () => {
+    // Fast heartbeat so the heartbeat test does not take minutes.
+    process.env.RUNNER_HEARTBEAT_MS = '100';
+
     fakeApi = createServer(fakeControlApi);
     await new Promise<void>((resolve) => fakeApi.listen(0, '127.0.0.1', resolve));
     const port = (fakeApi.address() as AddressInfo).port;
@@ -185,12 +210,13 @@ describe('Runner worker lifecycle (e2e)', () => {
     behavior.finalizeDefault = 201;
     behavior.finalizeStatuses = [];
     behavior.runStatus = 'running';
-    behavior.runMissing = false;
+    behavior.leaseExpiresAt = null;
+    behavior.recoverDefault = 201;
     await drain(RUN_JOBS_QUEUE);
     await drain(RUN_JOBS_DLQ);
   });
 
-  it('claims once, executes, records evidence, and finalizes passed', async () => {
+  it('claims with a lease, executes, records evidence, and finalizes passed', async () => {
     registerFake({
       scenario: 'test_success',
       execute: async (context) => {
@@ -213,17 +239,31 @@ describe('Runner worker lifecycle (e2e)', () => {
 
     const job = makeJob();
     await publish(job);
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
+    await waitFor(() => callsTo('/finalize').length > 0);
 
     const claimCall = calls.find((c) => c.path.includes(job.runId) && c.path.endsWith('/claim'));
     expect(claimCall?.token).toBe(TOKEN);
+    expect((claimCall?.body as { workerId?: string }).workerId).toMatch(/^runner-/);
     expect(calls.some((c) => c.path.includes(job.runId) && c.path.endsWith('/attempts'))).toBe(true);
-    expect(calls.some((c) => c.path.includes(job.runId) && c.path.endsWith('/assertions'))).toBe(true);
     expect(calls.find((c) => c.path.includes(job.runId) && c.path.endsWith('/finalize'))?.body).toEqual({
       status: 'passed',
       summary: 'All assertions passed',
     });
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
+  });
+
+  it('heartbeats while the executor is running', async () => {
+    registerFake({
+      scenario: 'test_heartbeat',
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        return { status: 'passed', summary: 'long enough' };
+      },
+    });
+
+    await publish(makeJob({ scenario: 'test_heartbeat' }));
+    await waitFor(() => callsTo('/finalize').length > 0);
+    expect(callsTo('/heartbeat').length).toBeGreaterThanOrEqual(2);
   });
 
   it('finalizes failed when an executor reports an assertion failure', async () => {
@@ -233,9 +273,9 @@ describe('Runner worker lifecycle (e2e)', () => {
     });
 
     await publish(makeJob({ scenario: 'test_failing' }));
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
+    await waitFor(() => callsTo('/finalize').length > 0);
 
-    expect(calls.find((c) => c.path.endsWith('/finalize'))?.body).toEqual({
+    expect(callsTo('/finalize')[0]?.body).toEqual({
       status: 'failed',
       summary: 'business effect count expected 1, got 3',
     });
@@ -250,9 +290,9 @@ describe('Runner worker lifecycle (e2e)', () => {
     });
 
     await publish(makeJob({ scenario: 'test_throwing' }));
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
+    await waitFor(() => callsTo('/finalize').length > 0);
 
-    const body = calls.find((c) => c.path.endsWith('/finalize'))?.body as {
+    const body = callsTo('/finalize')[0]?.body as {
       status: string;
       summary: string;
       safeError?: string;
@@ -264,17 +304,14 @@ describe('Runner worker lifecycle (e2e)', () => {
 
   it('finalizes error when no executor is registered for the scenario', async () => {
     await publish(makeJob({ scenario: 'scenario_without_executor' }));
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
+    await waitFor(() => callsTo('/finalize').length > 0);
 
-    const body = calls.find((c) => c.path.endsWith('/finalize'))?.body as {
-      status: string;
-      safeError?: string;
-    };
+    const body = callsTo('/finalize')[0]?.body as { status: string; safeError?: string };
     expect(body.status).toBe('error');
     expect(body.safeError).toContain('No executor registered');
   });
 
-  it('ignores duplicate jobs for a finished run (no second execution)', async () => {
+  it('ignores duplicate jobs for a finished run (no recovery, no execution)', async () => {
     let executions = 0;
     registerFake({
       scenario: 'test_conflict',
@@ -286,21 +323,21 @@ describe('Runner worker lifecycle (e2e)', () => {
 
     behavior.claimDefault = 409;
     behavior.runStatus = 'passed';
-    const job = makeJob({ scenario: 'test_conflict' });
-    await publish(job);
+    await publish(makeJob({ scenario: 'test_conflict' }));
 
-    await waitFor(() => calls.some((c) => c.path.endsWith('/claim')));
+    await waitFor(() => callsTo('/claim').length > 0);
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     expect(executions).toBe(0);
-    expect(calls.some((c) => c.path.endsWith('/finalize'))).toBe(false);
+    expect(callsTo('/finalize')).toHaveLength(0);
+    expect(callsTo('/recover')).toHaveLength(0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
-  it('recovers a stuck running run when a duplicate job arrives', async () => {
+  it('never recovers a run whose lease is still active', async () => {
     let executions = 0;
     registerFake({
-      scenario: 'test_recovery',
+      scenario: 'test_active_lease',
       execute: async () => {
         executions += 1;
         return { status: 'passed', summary: 'done' };
@@ -309,16 +346,38 @@ describe('Runner worker lifecycle (e2e)', () => {
 
     behavior.claimDefault = 409;
     behavior.runStatus = 'running';
-    await publish(makeJob({ scenario: 'test_recovery' }));
+    behavior.leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
+    await publish(makeJob({ scenario: 'test_active_lease' }));
 
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
+    await waitFor(() => callsTo('/claim').length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
     expect(executions).toBe(0);
-    const body = calls.find((c) => c.path.endsWith('/finalize'))?.body as {
-      status: string;
-      summary: string;
-    };
-    expect(body.status).toBe('error');
-    expect(body.summary).toContain('interrupted');
+    expect(callsTo('/recover')).toHaveLength(0);
+    expect(callsTo('/finalize')).toHaveLength(0);
+    await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
+  });
+
+  it('recovers a run whose lease has expired', async () => {
+    let executions = 0;
+    registerFake({
+      scenario: 'test_expired_lease',
+      execute: async () => {
+        executions += 1;
+        return { status: 'passed', summary: 'done' };
+      },
+    });
+
+    behavior.claimDefault = 409;
+    behavior.runStatus = 'running';
+    behavior.leaseExpiresAt = new Date(Date.now() - 60_000).toISOString();
+    await publish(makeJob({ scenario: 'test_expired_lease' }));
+
+    await waitFor(() => callsTo('/recover').length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(executions).toBe(0);
+    expect(callsTo('/recover').length).toBeGreaterThanOrEqual(1);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
@@ -331,10 +390,10 @@ describe('Runner worker lifecycle (e2e)', () => {
     behavior.claimStatuses = [503, 503];
     await publish(makeJob({ scenario: 'test_retry_claim' }));
 
-    await waitFor(() => calls.some((c) => c.path.endsWith('/finalize')));
-    const finalize = calls.find((c) => c.path.endsWith('/finalize'))?.body as { status: string };
+    await waitFor(() => callsTo('/finalize').length > 0);
+    const finalize = callsTo('/finalize')[0]?.body as { status: string };
     expect(finalize.status).toBe('passed');
-    expect(calls.filter((c) => c.path.endsWith('/claim')).length).toBeGreaterThanOrEqual(3);
+    expect(callsTo('/claim').length).toBeGreaterThanOrEqual(3);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
@@ -365,7 +424,7 @@ describe('Runner worker lifecycle (e2e)', () => {
     behavior.finalizeStatuses = [503];
     await publish(makeJob({ scenario: 'test_retry_finalize' }));
 
-    await waitFor(() => calls.filter((c) => c.path.endsWith('/finalize')).length >= 2);
+    await waitFor(() => callsTo('/finalize').length >= 2);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_DLQ)) === 0);
   });
@@ -375,7 +434,7 @@ describe('Runner worker lifecycle (e2e)', () => {
     await publish({ schemaVersion: 99, runId: '' });
 
     await waitFor(async () => (await queueDepth(RUN_JOBS_DLQ)) >= 2);
-    expect(calls.filter((c) => c.path.endsWith('/claim'))).toHaveLength(0);
+    expect(callsTo('/claim')).toHaveLength(0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 });

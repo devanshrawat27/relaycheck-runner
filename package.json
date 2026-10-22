@@ -11,6 +11,7 @@
     "start": "node dist/main",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "type-check": "tsc --noEmit -p tsconfig.json",
+    "dlq": "node scripts/dlq.mjs",
     "test": "jest --config test/jest-e2e.json --runInBand"
   },
   "dependencies": {
@@ -34,3 +35,4 @@
     "typescript": "^5.6.3"
   }
 }
+

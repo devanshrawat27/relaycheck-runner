@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { AssertionReport, AttemptReport } from '../execution/executor';
 
-export type ClaimResult = 'claimed' | 'conflict';
+export type ClaimOutcome =
+  | { outcome: 'claimed'; leaseExpiresAt: string | null }
+  | { outcome: 'conflict'; status: string; leaseExpiresAt: string | null };
 
 export interface FinalizeReport {
   status: 'passed' | 'failed' | 'error';
@@ -11,7 +13,7 @@ export interface FinalizeReport {
 
 /**
  * Typed Control API failure so callers can distinguish transient problems
- * (network, 5xx → retry) from permanent ones (401/403/404/409 → do not loop).
+ * (network, 5xx → retry) from permanent ones (401/403/404 → do not loop).
  */
 export class ControlApiError extends Error {
   constructor(
@@ -31,7 +33,7 @@ function isRetryableStatus(status: number): boolean {
 /**
  * HTTP client for the Control API's private runner-reporting endpoints.
  * The runner never touches the platform database — every write goes through
- * these authenticated calls.
+ * these authenticated calls. Claims are lease-based so ownership is explicit.
  */
 @Injectable()
 export class ControlApiClient {
@@ -61,17 +63,66 @@ export class ControlApiClient {
     }
   }
 
-  /** Claim a run exactly once. A conflict means another worker owns it. */
-  async claim(runId: string): Promise<ClaimResult> {
-    const response = await this.request('POST', `/api/internal/runs/${runId}/claim`);
+  private async readJson(response: Response): Promise<Record<string, unknown>> {
+    try {
+      return (await response.json()) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  /** Claim a run with a worker-owned lease. A conflict means another owner (or a terminal run). */
+  async claim(runId: string, workerId: string): Promise<ClaimOutcome> {
+    const response = await this.request('POST', `/api/internal/runs/${runId}/claim`, { workerId });
+    const body = await this.readJson(response);
+
     if (response.status === 201 || response.status === 200) {
-      return 'claimed';
+      return {
+        outcome: 'claimed',
+        leaseExpiresAt: typeof body.leaseExpiresAt === 'string' ? body.leaseExpiresAt : null,
+      };
     }
     if (response.status === 409) {
-      return 'conflict';
+      return {
+        outcome: 'conflict',
+        status: typeof body.status === 'string' ? body.status : 'unknown',
+        leaseExpiresAt: typeof body.leaseExpiresAt === 'string' ? body.leaseExpiresAt : null,
+      };
     }
     throw new ControlApiError(
       `Claim failed with HTTP ${response.status}`,
+      isRetryableStatus(response.status),
+      response.status,
+    );
+  }
+
+  /** Extend the lease. Returns false when this worker no longer owns the run. */
+  async heartbeat(runId: string, workerId: string): Promise<boolean> {
+    const response = await this.request('POST', `/api/internal/runs/${runId}/heartbeat`, { workerId });
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 409) {
+      return false;
+    }
+    throw new ControlApiError(
+      `Heartbeat failed with HTTP ${response.status}`,
+      isRetryableStatus(response.status),
+      response.status,
+    );
+  }
+
+  /** Recover a run whose lease has expired. Returns false when not recoverable. */
+  async recover(runId: string): Promise<boolean> {
+    const response = await this.request('POST', `/api/internal/runs/${runId}/recover`);
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 409) {
+      return false;
+    }
+    throw new ControlApiError(
+      `Recovery failed with HTTP ${response.status}`,
       isRetryableStatus(response.status),
       response.status,
     );
@@ -99,6 +150,7 @@ export class ControlApiClient {
     }
   }
 
+  /** Finalize the run. A 409 means it is already terminal (another path won). */
   async finalize(runId: string, report: FinalizeReport): Promise<void> {
     const response = await this.request('POST', `/api/internal/runs/${runId}/finalize`, report);
     if (!response.ok) {
@@ -108,22 +160,5 @@ export class ControlApiClient {
         response.status,
       );
     }
-  }
-
-  /** Run status for duplicate-job recovery decisions; null when it no longer exists. */
-  async getRunStatus(runId: string): Promise<string | null> {
-    const response = await this.request('GET', `/api/runs/${runId}`);
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      throw new ControlApiError(
-        `Run lookup failed with HTTP ${response.status}`,
-        isRetryableStatus(response.status),
-        response.status,
-      );
-    }
-    const body = (await response.json()) as { status?: unknown };
-    return typeof body.status === 'string' ? body.status : null;
   }
 }

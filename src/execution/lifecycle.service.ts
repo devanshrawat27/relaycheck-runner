@@ -1,5 +1,11 @@
+import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
-import { ControlApiClient, ControlApiError, FinalizeReport } from '../control-api/control-api.client';
+import {
+  ClaimOutcome,
+  ControlApiClient,
+  ControlApiError,
+  FinalizeReport,
+} from '../control-api/control-api.client';
 import { ExecutorRegistry } from './executor-registry';
 import { RunJob } from '../jobs/run-job';
 
@@ -18,18 +24,24 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 /**
  * Drives one run through its lifecycle:
  *
- *   claim (queued -> running, once)  ->  execute  ->  finalize (terminal)
+ *   claim (queued -> running, lease owned by this worker) -> execute -> finalize
+ *
+ * Ownership is lease-based: while executing, the worker heartbeats. A
+ * duplicate job may only recover a run whose lease has actually expired —
+ * an actively executing worker is never prematurely failed.
  *
  * Failure policy (returned to the consumer, which owns ack/requeue):
  *  - retryable Control API problems (network/5xx)  -> retry the job message
  *  - permanent problems (401/403/404)              -> dead-letter the job
- *  - duplicate job for an already-running run      -> recovery finalize `error`
- *  - duplicate job for a finished/deleted run      -> ack and ignore
+ *  - duplicate job for an active (unexpired) lease -> ignore (ack)
+ *  - duplicate job for an expired lease            -> recover to `error`
  *  - execution failure                             -> run finalized as `error`
  */
 @Injectable()
 export class LifecycleService {
   private readonly logger = new Logger(LifecycleService.name);
+  private readonly workerId = `runner-${randomUUID()}`;
+  private readonly heartbeatMs = Number(process.env.RUNNER_HEARTBEAT_MS ?? 10000);
 
   constructor(
     private readonly client: ControlApiClient,
@@ -38,13 +50,27 @@ export class LifecycleService {
 
   async process(job: RunJob): Promise<ProcessOutcome> {
     const claim = await this.claimWithRetry(job.runId);
-    if (claim.outcome !== 'claimed') {
-      return claim.outcome === 'conflict'
-        ? await this.handleClaimConflict(job.runId)
-        : claim.outcome;
+    if ('action' in claim) {
+      return claim;
+    }
+    if (claim.outcome === 'conflict') {
+      return this.handleClaimConflict(job.runId, claim);
     }
 
     let finalReport: FinalizeReport;
+    const heartbeat = setInterval(() => {
+      void this.client
+        .heartbeat(job.runId, this.workerId)
+        .then((owned) => {
+          if (!owned) {
+            this.logger.warn(`Lost lease ownership for run ${job.runId}`);
+          }
+        })
+        .catch((error: unknown) => {
+          this.logger.warn(`Heartbeat failed for run ${job.runId}: ${safeMessage(error)}`);
+        });
+    }, this.heartbeatMs);
+
     try {
       const executor = this.registry.get(job.scenario);
       if (!executor) {
@@ -68,6 +94,8 @@ export class LifecycleService {
         summary: 'Scenario execution could not complete',
         safeError: message.slice(0, 200),
       };
+    } finally {
+      clearInterval(heartbeat);
     }
 
     return this.finalizeWithRetry(job.runId, finalReport);
@@ -75,57 +103,75 @@ export class LifecycleService {
 
   private async claimWithRetry(
     runId: string,
-  ): Promise<{ outcome: 'claimed' | 'conflict' } | { outcome: ProcessOutcome }> {
+  ): Promise<ClaimOutcome | { action: 'retry' | 'dead-letter'; reason: string }> {
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt++) {
       try {
-        const result = await this.client.claim(runId);
-        return { outcome: result };
+        return await this.client.claim(runId, this.workerId);
       } catch (error) {
         const retryable = error instanceof ControlApiError ? error.retryable : true;
         if (!retryable) {
           this.logger.error(`Permanent claim failure for run ${runId}: ${safeMessage(error)}`);
-          return { outcome: { action: 'dead-letter', reason: safeMessage(error) } };
+          return { action: 'dead-letter', reason: safeMessage(error) };
         }
         if (attempt === CLAIM_ATTEMPTS) {
           this.logger.error(
             `Could not claim run ${runId} after ${CLAIM_ATTEMPTS} attempts: ${safeMessage(error)}`,
           );
-          return { outcome: { action: 'retry', reason: safeMessage(error) } };
+          return { action: 'retry', reason: safeMessage(error) };
         }
         await sleep(200 * attempt);
       }
     }
-    return { outcome: { action: 'retry', reason: 'claim retries exhausted' } };
+    return { action: 'retry', reason: 'claim retries exhausted' };
   }
 
   /**
-   * A redelivered job found the run already claimed. If it is still `running`,
-   * a previous worker likely died mid-execution — finalize it as `error` so the
-   * run cannot stay stuck forever. Terminal runs and deleted runs are ignored.
+   * A duplicate job found the run claimed by someone else. Only an expired
+   * lease is grounds for recovery; an active lease means it is still being
+   * executed and must be left alone.
    */
-  private async handleClaimConflict(runId: string): Promise<ProcessOutcome> {
-    let status: string | null;
-    try {
-      status = await this.client.getRunStatus(runId);
-    } catch (error) {
-      return retryOrDeadLetter(error, runId, 'run status lookup');
-    }
-
-    if (status === null) {
-      this.logger.warn(`Duplicate job for missing run ${runId}; discarding`);
+  private async handleClaimConflict(
+    runId: string,
+    conflict: Extract<ClaimOutcome, { outcome: 'conflict' }>,
+  ): Promise<ProcessOutcome> {
+    if (TERMINAL_STATUSES.has(conflict.status)) {
+      this.logger.warn(`Duplicate job for finished run ${runId} (${conflict.status}); ignoring`);
       return { action: 'ack' };
     }
-    if (TERMINAL_STATUSES.has(status)) {
-      this.logger.warn(`Duplicate job for finished run ${runId} (${status}); ignoring`);
+    if (conflict.status !== 'running') {
+      this.logger.warn(`Duplicate job for run ${runId} in status ${conflict.status}; ignoring`);
       return { action: 'ack' };
     }
 
-    this.logger.warn(`Run ${runId} is still ${status}; attempting recovery finalize`);
-    return this.finalizeWithRetry(runId, {
-      status: 'error',
-      summary: 'Execution was interrupted before completion',
-      safeError: 'A duplicate job found the run still running; recovery finalized it as error',
-    });
+    const expiresAt = conflict.leaseExpiresAt ? Date.parse(conflict.leaseExpiresAt) : NaN;
+    const leaseActive = Number.isFinite(expiresAt) && expiresAt > Date.now();
+    if (leaseActive) {
+      this.logger.warn(
+        `Duplicate job for run ${runId}: lease is still active (owner executing); ignoring`,
+      );
+      return { action: 'ack' };
+    }
+
+    this.logger.warn(`Run ${runId} lease expired; attempting recovery finalize`);
+    for (let attempt = 1; attempt <= FINALIZE_ATTEMPTS; attempt++) {
+      try {
+        const recovered = await this.client.recover(runId);
+        if (recovered) {
+          return { action: 'ack' };
+        }
+        return { action: 'ack' };
+      } catch (error) {
+        const retryable = error instanceof ControlApiError ? error.retryable : true;
+        if (!retryable) {
+          return { action: 'dead-letter', reason: safeMessage(error) };
+        }
+        if (attempt === FINALIZE_ATTEMPTS) {
+          return { action: 'retry', reason: safeMessage(error) };
+        }
+        await sleep(200 * attempt);
+      }
+    }
+    return { action: 'retry', reason: 'recovery retries exhausted' };
   }
 
   private async finalizeWithRetry(runId: string, report: FinalizeReport): Promise<ProcessOutcome> {
@@ -134,6 +180,10 @@ export class LifecycleService {
         await this.client.finalize(runId, report);
         return { action: 'ack' };
       } catch (error) {
+        if (error instanceof ControlApiError && error.status === 409) {
+          this.logger.warn(`Run ${runId} is already terminal; ignoring finalize conflict`);
+          return { action: 'ack' };
+        }
         const retryable = error instanceof ControlApiError ? error.retryable : true;
         if (!retryable) {
           this.logger.error(`Permanent finalize failure for run ${runId}: ${safeMessage(error)}`);
@@ -150,14 +200,6 @@ export class LifecycleService {
     }
     return { action: 'retry', reason: 'finalize retries exhausted' };
   }
-}
-
-function retryOrDeadLetter(error: unknown, runId: string, context: string): ProcessOutcome {
-  const retryable = error instanceof ControlApiError ? error.retryable : true;
-  const message = `${context} failed for run ${runId}: ${safeMessage(error)}`;
-  return retryable
-    ? { action: 'retry', reason: message }
-    : { action: 'dead-letter', reason: message };
 }
 
 function safeMessage(error: unknown): string {

@@ -39,17 +39,36 @@ destination cannot be smuggled in through the queue.
 
 ## Failure handling
 
+- Claims use a **lease** (`workerId` + expiry). While executing, the runner
+  heartbeats (default every 10 s, override `RUNNER_HEARTBEAT_MS`). A duplicate
+  job may recover a run **only if the lease has expired**; an actively
+  executing worker is never prematurely failed.
 - Transient Control API problems (network/5xx) are retried in-process
   (bounded) and, if still failing, the job message is republished with a
   retry header (max 5) before being dead-lettered.
+- Republished/retry/dead-letter copies are sent over a **confirm channel**;
+  the original message is acknowledged only after the broker confirms the
+  copy. Unconfirmed publishes leave the original for redelivery.
 - Permanent problems (401/403/404) are dead-lettered immediately.
 - Malformed jobs go to the dead-letter queue — never a requeue loop.
-- A redelivered job whose run is still `running` finalizes it as `error`
-  ("Execution was interrupted before completion") so no run stays stuck.
-- A redelivered job for a finished/deleted run is acknowledged and ignored.
+- The consumer reconnects with exponential backoff (max 30 s) after a channel
+  or connection failure.
 
 Queues: `relaycheck.run.jobs` (work) and `relaycheck.run.jobs.dlq`
 (poison/exhausted).
+
+## Dead-letter tooling
+
+From this repository:
+
+```bash
+npm run dlq                 # list dead-lettered messages (side-effect free)
+npm run dlq -- --limit 100  # list more
+npm run dlq -- --replay     # republish to the work queue, then ack
+npm run dlq -- --purge      # delete all dead-lettered messages
+```
+
+Each listing shows the run ID, retry count, and the recorded error reason.
 
 ## Scenarios
 
