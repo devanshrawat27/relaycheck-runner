@@ -105,22 +105,42 @@ export class RunJobConsumer {
       return;
     }
 
-    let raw: unknown;
     try {
-      raw = JSON.parse(message.content.toString());
-    } catch {
-      await this.deadLetter(message, 'Malformed job: invalid JSON');
-      return;
-    }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(message.content.toString());
+      } catch {
+        await this.deadLetter(message, 'Malformed job: invalid JSON');
+        return;
+      }
 
-    const job = parseRunJob(raw);
-    if (!job) {
-      await this.deadLetter(message, 'Malformed job: schema validation failed');
-      return;
-    }
+      const job = parseRunJob(raw);
+      if (!job) {
+        await this.deadLetter(message, 'Malformed job: schema validation failed');
+        return;
+      }
 
-    const outcome = await this.lifecycle.process(job);
-    await this.applyOutcome(message, outcome);
+      const outcome = await this.lifecycle.process(job);
+      await this.applyOutcome(message, outcome);
+    } catch (error) {
+      // Last-resort safety net: an unexpected exception must never leave the
+      // message unacknowledged (prefetch 1 would stall the worker). Apply the
+      // normal bounded retry policy, falling back to a requeue.
+      const reason = `Unexpected handling failure: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      this.logger.error(reason);
+      try {
+        await this.applyOutcome(message, { action: 'retry', reason });
+      } catch (retryError) {
+        this.logger.error(
+          `Retry policy failed too (${
+            retryError instanceof Error ? retryError.message : retryError
+          }); requeueing the original message`,
+        );
+        this.requeueOriginal(message);
+      }
+    }
   }
 
   private async applyOutcome(message: ConsumeMessage, outcome: ProcessOutcome): Promise<void> {
