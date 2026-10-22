@@ -52,7 +52,8 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
 
   private async executeFailure(context: ExecutionContext): Promise<ExecutionResult> {
     const receiver = resolveDemoReceiverBaseUrl();
-    await setReceiverFault(receiver, { mode: 'error', httpStatus: EXPECTED_ERROR_STATUS });
+    const expectedStatus = context.params.httpStatus ?? EXPECTED_ERROR_STATUS;
+    await setReceiverFault(receiver, { mode: 'error', httpStatus: expectedStatus });
 
     try {
       const event = this.makeEvent(context);
@@ -79,9 +80,9 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
         },
         {
           name: ASSERTION_RECEIVER_STATUS,
-          expected: String(EXPECTED_ERROR_STATUS),
+          expected: String(expectedStatus),
           actual: String(report.httpStatus ?? 'none'),
-          passed: report.httpStatus === EXPECTED_ERROR_STATUS && !delivered,
+          passed: report.httpStatus === expectedStatus && !delivered,
         },
         {
           name: ASSERTION_NO_EFFECT,
@@ -97,7 +98,8 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
 
   private async executeTimeout(context: ExecutionContext): Promise<ExecutionResult> {
     const receiver = resolveDemoReceiverBaseUrl();
-    await setReceiverFault(receiver, { mode: 'delay', delayMs: TIMEOUT_FAULT_DELAY_MS });
+    const delayMs = context.params.delayMs ?? TIMEOUT_FAULT_DELAY_MS;
+    await setReceiverFault(receiver, { mode: 'delay', delayMs });
 
     try {
       const event = this.makeEvent(context);
@@ -156,7 +158,10 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
       summary:
         context.scenario === SCENARIO_RECEIVER_TIMEOUT
           ? 'Delivery timed out as expected within a bounded attempt'
-          : `Receiver returned the expected ${EXPECTED_ERROR_STATUS} and applied no business effect`,
+          : `Receiver returned the expected ${
+              context.params.httpStatus ?? EXPECTED_ERROR_STATUS
+            } and applied no business effect`,
     };
   }
 }
+

@@ -4,6 +4,8 @@ export interface RunJobParams {
   orderId: string;
   deliveryCount: number;
   timeoutMs: number;
+  httpStatus?: number;
+  delayMs?: number;
 }
 
 /** Versioned job contract published by the Control API. */
@@ -23,7 +25,15 @@ function isBoundedInt(value: unknown, min: number, max: number): value is number
 }
 
 const TOP_LEVEL_KEYS = new Set(['schemaVersion', 'runId', 'scenario', 'params']);
-const PARAM_KEYS = new Set(['eventType', 'eventId', 'orderId', 'deliveryCount', 'timeoutMs']);
+const PARAM_KEYS = new Set([
+  'eventType',
+  'eventId',
+  'orderId',
+  'deliveryCount',
+  'timeoutMs',
+  'httpStatus',
+  'delayMs',
+]);
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: Set<string>): boolean {
   return Object.keys(value).every((key) => allowed.has(key));
@@ -66,6 +76,12 @@ export function parseRunJob(raw: unknown): RunJob | null {
   ) {
     return null;
   }
+  if (p.httpStatus !== undefined && !isBoundedInt(p.httpStatus, 400, 599)) {
+    return null;
+  }
+  if (p.delayMs !== undefined && !isBoundedInt(p.delayMs, 0, 10000)) {
+    return null;
+  }
   return {
     schemaVersion: 1,
     runId: candidate.runId,
@@ -76,6 +92,9 @@ export function parseRunJob(raw: unknown): RunJob | null {
       orderId: p.orderId,
       deliveryCount: p.deliveryCount,
       timeoutMs: p.timeoutMs,
+      ...(typeof p.httpStatus === 'number' ? { httpStatus: p.httpStatus } : {}),
+      ...(typeof p.delayMs === 'number' ? { delayMs: p.delayMs } : {}),
     },
   };
 }
+

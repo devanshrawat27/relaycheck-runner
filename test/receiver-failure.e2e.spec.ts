@@ -165,6 +165,28 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
     expect(faults).toBeNull();
   });
 
+  it('honors a custom injected status', async () => {
+    const context = makeContext(SCENARIO_RECEIVER_FAILURE, 3000);
+    context.params.httpStatus = 429;
+    const result = await executor().execute(context);
+
+    expect(result.status).toBe('passed');
+    expect(assertions.find((a) => a.name === ASSERTION_RECEIVER_STATUS)).toMatchObject({
+      expected: '429',
+      actual: '429',
+      passed: true,
+    });
+  });
+
+  it('honors a custom injected delay for the timeout scenario', async () => {
+    const context = makeContext(SCENARIO_RECEIVER_TIMEOUT, 100);
+    context.params.delayMs = 400;
+    const result = await executor().execute(context);
+
+    expect(result.status).toBe('passed');
+    expect(attempts[0]?.outcome).toBe('timeout');
+  });
+
   it('receiver_failure fails when the receiver does not return the expected error', async () => {
     ignoreFault = true;
     const result = await executor().execute(makeContext(SCENARIO_RECEIVER_FAILURE, 3000));
@@ -197,3 +219,4 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
     expect(attempts).toHaveLength(0);
   });
 });
+

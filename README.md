@@ -74,9 +74,12 @@ Each listing shows the run ID, retry count, and the recorded error reason.
 
 | Scenario | Behaviour |
 |---|---|
-| `duplicate_delivery` | 3 deliveries of one event ID; expects 3 attempts and exactly 1 business effect |
-| `receiver_failure` | injects a test-only 503; expects that status and **no** business effect |
-| `receiver_timeout` | injects a delay beyond the client timeout; expects a recorded timeout attempt |
+| `duplicate_delivery` | 1–5 deliveries of one event ID (default 3); expects the same number of attempts and exactly 1 business effect |
+| `receiver_failure` | injects a test-only 400–599 status (default 503); expects that status and **no** business effect |
+| `receiver_timeout` | injects a delay (default 2000 ms, must exceed the timeout); expects a recorded timeout attempt |
+
+Optional job params `httpStatus`/`delayMs` are validated at the worker boundary
+(out-of-range values are rejected).
 
 Failure/timeout scenarios require the receiver to run with
 `RELAYCHECK_TEST_MODE=true`; otherwise the run ends as `error` (fail closed).

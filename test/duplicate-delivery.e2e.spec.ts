@@ -145,6 +145,19 @@ describe('duplicate_delivery executor (e2e)', () => {
     ]);
   });
 
+  it('honors a custom delivery count and still requires one business effect', async () => {
+    const result = await executor().execute(makeContext({ deliveryCount: 5 }));
+
+    expect(result.status).toBe('passed');
+    expect(requests.filter((r) => r.method === 'POST')).toHaveLength(5);
+    expect(attempts.map((a) => a.attemptNumber)).toEqual([1, 2, 3, 4, 5]);
+    expect(assertions.find((a) => a.name === ASSERTION_ATTEMPT_COUNT)).toMatchObject({
+      expected: '5',
+      actual: '5',
+      passed: true,
+    });
+  });
+
   it('fails when duplicate deliveries produce more than one business effect', async () => {
     behavior.effectCount = 3;
     const result = await executor().execute(makeContext());
@@ -235,5 +248,14 @@ describe('duplicate_delivery executor (e2e)', () => {
     ).toBeNull();
     expect(parseRunJob({ ...valid, destinationUrl: 'https://evil.example.com' })).toBeNull();
     expect(parseRunJob({ ...valid, params: { ...valid.params, url: 'https://evil.example.com' } })).toBeNull();
+
+    // Optional bounded fault parameters are accepted...
+    expect(
+      parseRunJob({ ...valid, params: { ...valid.params, httpStatus: 503, delayMs: 2000 } }),
+    ).not.toBeNull();
+    // ...but out-of-range values are rejected.
+    expect(parseRunJob({ ...valid, params: { ...valid.params, httpStatus: 200 } })).toBeNull();
+    expect(parseRunJob({ ...valid, params: { ...valid.params, delayMs: 60000 } })).toBeNull();
   });
 });
+
