@@ -101,6 +101,9 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
         orderId: 'ord_receiver_fault_1',
         deliveryCount: 1,
         timeoutMs,
+        targetName: 'demo-receiver',
+        targetUrl: process.env.DEMO_RECEIVER_URL ?? '',
+        targetOracle: true,
       },
       report: {
         attempt: async (report) => {
@@ -219,4 +222,5 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
     expect(attempts).toHaveLength(0);
   });
 });
+
 

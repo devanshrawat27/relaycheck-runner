@@ -77,6 +77,7 @@ export async function deliverDemoEvent(
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(event),
+      redirect: 'error',
       signal: AbortSignal.timeout(timeoutMs),
     });
     httpStatus = response.status;
@@ -116,7 +117,10 @@ export async function fetchBusinessEffectCount(
 
   let response: Response;
   try {
-    response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    response = await fetch(url, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
   } catch (error) {
     throw new Error(`Receiver test oracle unavailable: ${describeError(error)}`);
   }
@@ -176,3 +180,4 @@ export async function clearReceiverFault(receiver: URL): Promise<void> {
     // Best-effort cleanup only.
   }
 }
+

@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AssertionReport, ExecutionContext, ExecutionResult, ScenarioExecutor } from '../execution/executor';
 import { ExecutorRegistry } from './../execution/executor-registry';
+import { resolveJobTarget } from '../targets/target-registry';
 
 /** Fixed delivery path on the demo receiver; the host comes only from configuration. */
 const DELIVERIES_PATH = '/api/webhooks/demo';
@@ -78,7 +79,8 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
   }
 
   async execute(context: ExecutionContext): Promise<ExecutionResult> {
-    const receiver = resolveDemoReceiverBaseUrl();
+    const target = await resolveJobTarget(context.params);
+    const receiver = new URL(target.url);
     const deliveryUrl = new URL(DELIVERIES_PATH, receiver).toString();
 
     // One stable payload: every delivery must carry the SAME event ID.
@@ -104,6 +106,7 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
+          redirect: 'error',
           signal: AbortSignal.timeout(context.params.timeoutMs),
         });
         httpStatus = response.status;
@@ -132,11 +135,13 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
       attemptsRecorded += 1;
     }
 
-    const businessEffectCount = await this.fetchBusinessEffectCount(
-      receiver,
-      context.params.orderId,
-      context.params.timeoutMs,
-    );
+    const businessEffectCount = target.oracle
+      ? await this.fetchBusinessEffectCount(
+          receiver,
+          context.params.orderId,
+          context.params.timeoutMs,
+        )
+      : null;
 
     const assertions: AssertionReport[] = [
       {
@@ -151,12 +156,16 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
         actual: String(deliveredCount),
         passed: deliveredCount === context.params.deliveryCount,
       },
-      {
-        name: ASSERTION_EFFECT_ONCE,
-        expected: '1',
-        actual: String(businessEffectCount),
-        passed: businessEffectCount === 1,
-      },
+      ...(target.oracle
+        ? [
+            {
+              name: ASSERTION_EFFECT_ONCE,
+              expected: '1',
+              actual: String(businessEffectCount),
+              passed: businessEffectCount === 1,
+            },
+          ]
+        : []),
     ];
     for (const assertion of assertions) {
       await context.report.assertion(assertion);
@@ -173,7 +182,11 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
     }
     return {
       status: 'passed',
-      summary: `${context.params.deliveryCount} attempts recorded, ${deliveredCount} accepted, ${businessEffectCount} business effect`,
+      summary: `${context.params.deliveryCount} attempts recorded, ${deliveredCount} accepted, ${
+        target.oracle
+          ? `${businessEffectCount} business effect`
+          : `no oracle (${target.name})`
+      }`,
     };
   }
 

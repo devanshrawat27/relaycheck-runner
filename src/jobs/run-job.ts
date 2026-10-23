@@ -6,6 +6,9 @@ export interface RunJobParams {
   timeoutMs: number;
   httpStatus?: number;
   delayMs?: number;
+  targetName: string;
+  targetUrl: string;
+  targetOracle: boolean;
 }
 
 /** Versioned job contract published by the Control API. */
@@ -33,6 +36,9 @@ const PARAM_KEYS = new Set([
   'timeoutMs',
   'httpStatus',
   'delayMs',
+  'targetName',
+  'targetUrl',
+  'targetOracle',
 ]);
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: Set<string>): boolean {
@@ -82,6 +88,13 @@ export function parseRunJob(raw: unknown): RunJob | null {
   if (p.delayMs !== undefined && !isBoundedInt(p.delayMs, 0, 10000)) {
     return null;
   }
+  if (
+    !isNonEmptyString(p.targetName) ||
+    !isNonEmptyString(p.targetUrl) ||
+    typeof p.targetOracle !== 'boolean'
+  ) {
+    return null;
+  }
   return {
     schemaVersion: 1,
     runId: candidate.runId,
@@ -94,7 +107,11 @@ export function parseRunJob(raw: unknown): RunJob | null {
       timeoutMs: p.timeoutMs,
       ...(typeof p.httpStatus === 'number' ? { httpStatus: p.httpStatus } : {}),
       ...(typeof p.delayMs === 'number' ? { delayMs: p.delayMs } : {}),
+      targetName: p.targetName,
+      targetUrl: p.targetUrl,
+      targetOracle: p.targetOracle,
     },
   };
 }
+
 

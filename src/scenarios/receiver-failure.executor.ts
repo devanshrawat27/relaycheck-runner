@@ -1,11 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AssertionReport, ExecutionContext, ExecutionResult, ScenarioExecutor } from '../execution/executor';
 import { ExecutorRegistry } from '../execution/executor-registry';
+import { resolveJobTarget } from '../targets/target-registry';
 import {
   clearReceiverFault,
   deliverDemoEvent,
   fetchBusinessEffectCount,
-  resolveDemoReceiverBaseUrl,
   setReceiverFault,
 } from './demo-receiver.client';
 
@@ -51,7 +51,11 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
   }
 
   private async executeFailure(context: ExecutionContext): Promise<ExecutionResult> {
-    const receiver = resolveDemoReceiverBaseUrl();
+    const target = await resolveJobTarget(context.params);
+    if (target.kind !== 'demo') {
+      throw new Error('receiver_failure requires the demo receiver target');
+    }
+    const receiver = new URL(target.url);
     const expectedStatus = context.params.httpStatus ?? EXPECTED_ERROR_STATUS;
     await setReceiverFault(receiver, { mode: 'error', httpStatus: expectedStatus });
 
@@ -97,7 +101,11 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
   }
 
   private async executeTimeout(context: ExecutionContext): Promise<ExecutionResult> {
-    const receiver = resolveDemoReceiverBaseUrl();
+    const target = await resolveJobTarget(context.params);
+    if (target.kind !== 'demo') {
+      throw new Error('receiver_timeout requires the demo receiver target');
+    }
+    const receiver = new URL(target.url);
     const delayMs = context.params.delayMs ?? TIMEOUT_FAULT_DELAY_MS;
     await setReceiverFault(receiver, { mode: 'delay', delayMs });
 
@@ -164,4 +172,5 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
     };
   }
 }
+
 

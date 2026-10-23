@@ -24,7 +24,14 @@ describe('duplicate_delivery executor (e2e)', () => {
   let requests: RecordedRequest[];
   let attempts: AttemptReport[];
   let assertions: AssertionReport[];
-  const behavior = { status: 201, delayMs: 0, effectCount: 1, oracleStatus: 200, oracleDelayMs: 0 };
+  const behavior = {
+    status: 201,
+    delayMs: 0,
+    effectCount: 1,
+    oracleStatus: 200,
+    oracleDelayMs: 0,
+    redirectTo: '' as string,
+  };
 
   function handler(req: IncomingMessage, res: ServerResponse): void {
     const chunks: Buffer[] = [];
@@ -58,6 +65,12 @@ describe('duplicate_delivery executor (e2e)', () => {
       }
 
       const respond = (): void => {
+        if (behavior.redirectTo) {
+          res.statusCode = 302;
+          res.setHeader('location', behavior.redirectTo);
+          res.end();
+          return;
+        }
         res.statusCode = behavior.status;
         res.end(JSON.stringify({ accepted: true }));
       };
@@ -81,6 +94,9 @@ describe('duplicate_delivery executor (e2e)', () => {
         orderId: overrides.orderId ?? 'ord_duplicate_test_1',
         deliveryCount: overrides.deliveryCount ?? 3,
         timeoutMs: overrides.timeoutMs ?? 2000,
+        targetName: 'demo-receiver',
+        targetUrl: process.env.DEMO_RECEIVER_URL ?? '',
+        targetOracle: true,
       },
       report: {
         attempt: async (report) => {
@@ -117,6 +133,7 @@ describe('duplicate_delivery executor (e2e)', () => {
     behavior.effectCount = 1;
     behavior.oracleStatus = 200;
     behavior.oracleDelayMs = 0;
+    behavior.redirectTo = '';
     process.env.DEMO_RECEIVER_URL = receiverUrl;
   });
 
@@ -220,10 +237,65 @@ describe('duplicate_delivery executor (e2e)', () => {
     );
   });
 
-  it('refuses to deliver to a non-local configured target', async () => {
-    process.env.DEMO_RECEIVER_URL = 'https://evil.example.com';
-    await expect(executor().execute(makeContext())).rejects.toThrow('must be local');
-    expect(requests).toHaveLength(0);
+  it('delivers to an allowlisted remote target without a business-effect oracle', async () => {
+    process.env.TARGETS_JSON = JSON.stringify([
+      { name: 'mock-remote', url: receiverUrl, allowPrivate: true, oracle: false },
+    ]);
+    try {
+      const context = makeContext();
+      context.params.targetName = 'mock-remote';
+      context.params.targetUrl = receiverUrl;
+      context.params.targetOracle = false;
+
+      const result = await executor().execute(context);
+
+      expect(result.status).toBe('passed');
+      expect(attempts).toHaveLength(3);
+      expect(assertions.map((a) => a.name)).toEqual([
+        ASSERTION_ATTEMPT_COUNT,
+        ASSERTION_DELIVERIES_ACCEPTED,
+      ]);
+      expect(result.summary).toContain('no oracle');
+    } finally {
+      delete process.env.TARGETS_JSON;
+    }
+  });
+
+  it('refuses unknown and mismatched targets', async () => {
+    const unknown = makeContext();
+    unknown.params.targetName = 'nope';
+    await expect(executor().execute(unknown)).rejects.toThrow('Unknown or disabled target');
+
+    const mismatch = makeContext();
+    mismatch.params.targetUrl = 'http://127.0.0.1:5999';
+    await expect(executor().execute(mismatch)).rejects.toThrow('does not match');
+  });
+
+  it('refuses private targets that are not explicitly allowed', async () => {
+    process.env.TARGETS_JSON = JSON.stringify([
+      { name: 'private-target', url: receiverUrl, oracle: false },
+    ]);
+    try {
+      const context = makeContext();
+      context.params.targetName = 'private-target';
+      context.params.targetUrl = receiverUrl;
+      await expect(executor().execute(context)).rejects.toThrow('Unknown or disabled target');
+    } finally {
+      delete process.env.TARGETS_JSON;
+    }
+  });
+
+  it('refuses to follow redirects from the target', async () => {
+    behavior.redirectTo = 'http://127.0.0.1:5999/steal';
+    const result = await executor().execute(makeContext());
+
+    expect(result.status).toBe('failed');
+    expect(attempts.every((a) => a.outcome === 'error')).toBe(true);
+  });
+
+  it('reports an execution error when the configured target is unreachable', async () => {
+    process.env.DEMO_RECEIVER_URL = 'https://unreachable.invalid';
+    await expect(executor().execute(makeContext())).rejects.toThrow('oracle unavailable');
   });
 
   it('rejects jobs that try to smuggle a destination or any extra field', () => {
@@ -237,6 +309,9 @@ describe('duplicate_delivery executor (e2e)', () => {
         orderId: 'ord_1',
         deliveryCount: 3,
         timeoutMs: 5000,
+        targetName: 'demo-receiver',
+        targetUrl: 'http://127.0.0.1:3100',
+        targetOracle: true,
       },
     };
     expect(parseRunJob(valid)).not.toBeNull();
@@ -258,4 +333,6 @@ describe('duplicate_delivery executor (e2e)', () => {
     expect(parseRunJob({ ...valid, params: { ...valid.params, delayMs: 60000 } })).toBeNull();
   });
 });
+
+
 

@@ -81,6 +81,23 @@ Each listing shows the run ID, retry count, and the recorded error reason.
 Optional job params `httpStatus`/`delayMs` are validated at the worker boundary
 (out-of-range values are rejected).
 
+## Delivery targets
+
+Jobs carry a target **name** and URL, but the runner trusts only its own
+configuration:
+
+- `demo-receiver` maps to `DEMO_RECEIVER_URL` (loopback by default) and is the
+  only target allowed for fault/oracle scenarios.
+- Additional targets come from the runner's own `TARGETS_JSON` (same format as
+  the API). The job URL must match the configured entry exactly; unknown names
+  or mismatches fail closed.
+- Private/loopback hosts are refused unless `allowPrivate: true`; DNS
+  resolution is checked and failures count as "not allowed".
+- Redirects are never followed (`redirect: 'error'`).
+- Targets without an oracle assert delivery attempts/status only; the run
+  summary says "no oracle (<target>)" and no business-effect assertion is
+  recorded.
+
 Failure/timeout scenarios require the receiver to run with
 `RELAYCHECK_TEST_MODE=true`; otherwise the run ends as `error` (fail closed).
 The executor clears any injected fault afterwards.

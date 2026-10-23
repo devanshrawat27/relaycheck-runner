@@ -161,6 +161,9 @@ describe('Runner worker lifecycle (e2e)', () => {
         orderId: 'ord_runner_test_1',
         deliveryCount: 3,
         timeoutMs: 5000,
+        targetName: 'demo-receiver',
+        targetUrl: 'http://127.0.0.1:3100',
+        targetOracle: true,
       },
       ...overrides,
     };
@@ -438,3 +441,4 @@ describe('Runner worker lifecycle (e2e)', () => {
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 });
+
