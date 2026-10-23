@@ -43,6 +43,11 @@ destination cannot be smuggled in through the queue.
   heartbeats (default every 10 s, override `RUNNER_HEARTBEAT_MS`). A duplicate
   job may recover a run **only if the lease has expired**; an actively
   executing worker is never prematurely failed.
+- **Interrupted runs resume**: on an expired lease the runner takes the run
+  over (`resume-claim`), reads recorded attempts (`progress`), and executes
+  only the remaining deliveries. The summary is marked `resumed from N`. A
+  crash mid-delivery can record one extra attempt (at-least-once); a crash on
+  the final attempt still ends as `error` rather than a false pass.
 - Transient Control API problems (network/5xx) are retried in-process
   (bounded) and, if still failing, the job message is republished with a
   retry header (max 5) before being dead-lettered.

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AssertionReport, AttemptReport } from '../execution/executor';
+import { AssertionReport, AttemptReport, RecordedAttempt } from '../execution/executor';
 
 export type ClaimOutcome =
   | { outcome: 'claimed'; leaseExpiresAt: string | null }
@@ -112,6 +112,44 @@ export class ControlApiClient {
     );
   }
 
+  /** Take over an abandoned run (expired lease) to resume it. False when not possible. */
+  async resumeClaim(runId: string, workerId: string): Promise<boolean> {
+    const response = await this.request('POST', `/api/internal/runs/${runId}/resume-claim`, {
+      workerId,
+    });
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 409 || response.status === 404) {
+      return false;
+    }
+    throw new ControlApiError(
+      `Resume claim failed with HTTP ${response.status}`,
+      isRetryableStatus(response.status),
+      response.status,
+    );
+  }
+
+  /** Recorded attempts/assertions for a run (internal progress endpoint). */
+  async getProgress(runId: string): Promise<{
+    status: string;
+    attempts: RecordedAttempt[];
+  }> {
+    const response = await this.request('GET', `/api/internal/runs/${runId}/progress`);
+    if (!response.ok) {
+      throw new ControlApiError(
+        `Progress failed with HTTP ${response.status}`,
+        isRetryableStatus(response.status),
+        response.status,
+      );
+    }
+    const body = (await response.json()) as { status?: unknown; attempts?: unknown };
+    return {
+      status: typeof body.status === 'string' ? body.status : 'unknown',
+      attempts: Array.isArray(body.attempts) ? (body.attempts as RecordedAttempt[]) : [],
+    };
+  }
+
   /** Recover a run whose lease has expired. Returns false when not recoverable. */
   async recover(runId: string): Promise<boolean> {
     const response = await this.request('POST', `/api/internal/runs/${runId}/recover`);
@@ -162,3 +200,4 @@ export class ControlApiClient {
     }
   }
 }
+

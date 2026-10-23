@@ -36,6 +36,8 @@ describe('Runner worker lifecycle (e2e)', () => {
     runStatus: 'running',
     leaseExpiresAt: null as string | null,
     recoverDefault: 201,
+    resumeDefault: 201,
+    progressAttempts: [] as Record<string, unknown>[],
   };
   let pubConn: ChannelModel;
 
@@ -87,6 +89,18 @@ describe('Runner worker lifecycle (e2e)', () => {
       if (req.url?.endsWith('/heartbeat')) {
         res.statusCode = 201;
         res.end(JSON.stringify({ extended: true }));
+        return;
+      }
+
+      if (req.url?.endsWith('/resume-claim')) {
+        res.statusCode = behavior.resumeDefault;
+        res.end(JSON.stringify({ runId: 'run', status: 'running', leaseExpiresAt: new Date(Date.now() + 30000).toISOString() }));
+        return;
+      }
+
+      if (req.url?.endsWith('/progress')) {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ status: 'running', attempts: behavior.progressAttempts, assertions: [] }));
         return;
       }
 
@@ -215,6 +229,8 @@ describe('Runner worker lifecycle (e2e)', () => {
     behavior.runStatus = 'running';
     behavior.leaseExpiresAt = null;
     behavior.recoverDefault = 201;
+    behavior.resumeDefault = 201;
+    behavior.progressAttempts = [];
     await drain(RUN_JOBS_QUEUE);
     await drain(RUN_JOBS_DLQ);
   });
@@ -333,7 +349,7 @@ describe('Runner worker lifecycle (e2e)', () => {
 
     expect(executions).toBe(0);
     expect(callsTo('/finalize')).toHaveLength(0);
-    expect(callsTo('/recover')).toHaveLength(0);
+    expect(callsTo('/resume-claim')).toHaveLength(0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
@@ -356,31 +372,74 @@ describe('Runner worker lifecycle (e2e)', () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     expect(executions).toBe(0);
-    expect(callsTo('/recover')).toHaveLength(0);
+    expect(callsTo('/resume-claim')).toHaveLength(0);
     expect(callsTo('/finalize')).toHaveLength(0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
-  it('recovers a run whose lease has expired', async () => {
-    let executions = 0;
+  it('resumes a run whose lease has expired from its recorded attempts', async () => {
+    let resumedAttempts = -1;
     registerFake({
       scenario: 'test_expired_lease',
-      execute: async () => {
-        executions += 1;
-        return { status: 'passed', summary: 'done' };
+      execute: async (context) => {
+        resumedAttempts = context.resumeAttempts?.length ?? 0;
+        return { status: 'passed', summary: 'resumed fine' };
       },
     });
 
     behavior.claimDefault = 409;
     behavior.runStatus = 'running';
     behavior.leaseExpiresAt = new Date(Date.now() - 60_000).toISOString();
+    behavior.progressAttempts = [
+      {
+        attemptNumber: 1,
+        eventId: 'evt_resume',
+        httpStatus: 201,
+        outcome: 'delivered',
+        durationMs: 10,
+        errorDetail: null,
+      },
+      {
+        attemptNumber: 2,
+        eventId: 'evt_resume',
+        httpStatus: 201,
+        outcome: 'delivered',
+        durationMs: 11,
+        errorDetail: null,
+      },
+    ];
     await publish(makeJob({ scenario: 'test_expired_lease' }));
 
-    await waitFor(() => callsTo('/recover').length > 0);
+    await waitFor(() => callsTo('/finalize').length > 0);
+
+    expect(callsTo('/resume-claim').length).toBeGreaterThanOrEqual(1);
+    expect(callsTo('/progress').length).toBeGreaterThanOrEqual(1);
+    expect(resumedAttempts).toBe(2);
+    expect(callsTo('/finalize')[0]?.body).toMatchObject({ status: 'passed' });
+    await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
+  });
+
+  it('acknowledges without resuming when another worker already resumed', async () => {
+    let executions = 0;
+    registerFake({
+      scenario: 'test_resume_conflict',
+      execute: async () => {
+        executions += 1;
+        return { status: 'passed', summary: 'never' };
+      },
+    });
+
+    behavior.claimDefault = 409;
+    behavior.runStatus = 'running';
+    behavior.leaseExpiresAt = new Date(Date.now() - 60_000).toISOString();
+    behavior.resumeDefault = 409;
+    await publish(makeJob({ scenario: 'test_resume_conflict' }));
+
+    await waitFor(() => callsTo('/resume-claim').length > 0);
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(executions).toBe(0);
-    expect(callsTo('/recover').length).toBeGreaterThanOrEqual(1);
+    expect(callsTo('/finalize')).toHaveLength(0);
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 
@@ -441,4 +500,6 @@ describe('Runner worker lifecycle (e2e)', () => {
     await waitFor(async () => (await queueDepth(RUN_JOBS_QUEUE)) === 0);
   });
 });
+
+
 

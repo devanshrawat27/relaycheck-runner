@@ -237,6 +237,40 @@ describe('duplicate_delivery executor (e2e)', () => {
     );
   });
 
+  it('resumes remaining deliveries from recorded attempts', async () => {
+    const context = makeContext({ deliveryCount: 5 });
+    context.resumeAttempts = [
+      {
+        attemptNumber: 1,
+        eventId: 'evt_duplicate_test_1',
+        outcome: 'delivered',
+        httpStatus: 201,
+        durationMs: 10,
+        errorDetail: null,
+      },
+      {
+        attemptNumber: 2,
+        eventId: 'evt_duplicate_test_1',
+        outcome: 'delivered',
+        httpStatus: 201,
+        durationMs: 11,
+        errorDetail: null,
+      },
+    ];
+
+    const result = await executor().execute(context);
+
+    expect(result.status).toBe('passed');
+    expect(requests.filter((r) => r.method === 'POST')).toHaveLength(3);
+    expect(attempts.map((a) => a.attemptNumber)).toEqual([3, 4, 5]);
+    expect(assertions.find((a) => a.name === ASSERTION_ATTEMPT_COUNT)).toMatchObject({
+      expected: '5',
+      actual: '5',
+      passed: true,
+    });
+    expect(result.summary).toContain('resumed from 2');
+  });
+
   it('delivers to an allowlisted remote target without a business-effect oracle', async () => {
     process.env.TARGETS_JSON = JSON.stringify([
       { name: 'mock-remote', url: receiverUrl, allowPrivate: true, oracle: false },

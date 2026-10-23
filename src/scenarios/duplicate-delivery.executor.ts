@@ -93,9 +93,18 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
       occurredAt: new Date().toISOString(),
     };
 
-    let deliveredCount = 0;
-    let attemptsRecorded = 0;
-    for (let attemptNumber = 1; attemptNumber <= context.params.deliveryCount; attemptNumber++) {
+    const priorAttempts = context.resumeAttempts ?? [];
+    let deliveredCount = priorAttempts.filter(
+      (attempt) =>
+        attempt.outcome === 'delivered' &&
+        typeof attempt.httpStatus === 'number' &&
+        attempt.httpStatus >= 200 &&
+        attempt.httpStatus < 300,
+    ).length;
+    let attemptsRecorded = priorAttempts.length;
+    const firstAttempt =
+      priorAttempts.reduce((max, attempt) => Math.max(max, attempt.attemptNumber), 0) + 1;
+    for (let attemptNumber = firstAttempt; attemptNumber <= context.params.deliveryCount; attemptNumber++) {
       const startedAt = Date.now();
       let httpStatus: number | undefined;
       let outcome: 'delivered' | 'error' | 'timeout' = 'delivered';
@@ -180,9 +189,11 @@ export class DuplicateDeliveryExecutor implements ScenarioExecutor, OnModuleInit
           .join('; '),
       };
     }
+    const resumedNote =
+      priorAttempts.length > 0 ? `resumed from ${priorAttempts.length}; ` : '';
     return {
       status: 'passed',
-      summary: `${context.params.deliveryCount} attempts recorded, ${deliveredCount} accepted, ${
+      summary: `${resumedNote}${context.params.deliveryCount} attempts recorded, ${deliveredCount} accepted, ${
         target.oracle
           ? `${businessEffectCount} business effect`
           : `no oracle (${target.name})`

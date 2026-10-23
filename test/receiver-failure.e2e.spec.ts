@@ -168,6 +168,30 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
     expect(faults).toBeNull();
   });
 
+  it('receiver_failure resumes without re-delivering a recorded attempt', async () => {
+    const context = makeContext(SCENARIO_RECEIVER_FAILURE, 3000);
+    context.resumeAttempts = [
+      {
+        attemptNumber: 1,
+        eventId: 'evt_receiver_fault_1',
+        httpStatus: 503,
+        outcome: 'error',
+        durationMs: 10,
+        errorDetail: 'HTTP 503',
+      },
+    ];
+
+    const result = await executor().execute(context);
+
+    expect(result.status).toBe('passed');
+    expect(attempts).toHaveLength(0);
+    expect(assertions.find((a) => a.name === ASSERTION_RECEIVER_STATUS)).toMatchObject({
+      expected: '503',
+      actual: '503',
+      passed: true,
+    });
+  });
+
   it('honors a custom injected status', async () => {
     const context = makeContext(SCENARIO_RECEIVER_FAILURE, 3000);
     context.params.httpStatus = 429;
@@ -222,5 +246,6 @@ describe('Controlled receiver failure/timeout scenarios (e2e)', () => {
     expect(attempts).toHaveLength(0);
   });
 });
+
 
 

@@ -1,5 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { AssertionReport, ExecutionContext, ExecutionResult, ScenarioExecutor } from '../execution/executor';
+import {
+  AssertionReport,
+  AttemptReport,
+  ExecutionContext,
+  ExecutionResult,
+  ScenarioExecutor,
+} from '../execution/executor';
 import { ExecutorRegistry } from '../execution/executor-registry';
 import { resolveJobTarget } from '../targets/target-registry';
 import {
@@ -57,21 +63,36 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
     }
     const receiver = new URL(target.url);
     const expectedStatus = context.params.httpStatus ?? EXPECTED_ERROR_STATUS;
-    await setReceiverFault(receiver, { mode: 'error', httpStatus: expectedStatus });
+    const prior = context.resumeAttempts ?? [];
+    const existing = prior.find((attempt) => attempt.attemptNumber === 1);
 
     try {
-      const event = this.makeEvent(context);
-      const { report, delivered } = await deliverDemoEvent(
-        receiver,
-        event,
-        1,
-        context.params.timeoutMs,
-      );
-      await context.report.attempt(report);
+      let report: AttemptReport;
+      let delivered: boolean;
+
+      if (existing) {
+        // Resuming: the attempt was already recorded, so do not deliver again.
+        report = {
+          attemptNumber: existing.attemptNumber,
+          eventId: existing.eventId,
+          httpStatus: existing.httpStatus ?? undefined,
+          outcome: existing.outcome,
+          durationMs: existing.durationMs,
+          errorDetail: existing.errorDetail ?? undefined,
+        };
+        delivered = existing.outcome === 'delivered';
+      } else {
+        await setReceiverFault(receiver, { mode: 'error', httpStatus: expectedStatus });
+        const event = this.makeEvent(context);
+        const result = await deliverDemoEvent(receiver, event, 1, context.params.timeoutMs);
+        report = result.report;
+        delivered = result.delivered;
+        await context.report.attempt(report);
+      }
 
       const effectCount = await fetchBusinessEffectCount(
         receiver,
-        event.orderId,
+        context.params.orderId,
         context.params.timeoutMs,
       );
 
@@ -107,12 +128,28 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
     }
     const receiver = new URL(target.url);
     const delayMs = context.params.delayMs ?? TIMEOUT_FAULT_DELAY_MS;
-    await setReceiverFault(receiver, { mode: 'delay', delayMs });
+    const prior = context.resumeAttempts ?? [];
+    const existing = prior.find((attempt) => attempt.attemptNumber === 1);
 
     try {
-      const event = this.makeEvent(context);
-      const { report } = await deliverDemoEvent(receiver, event, 1, context.params.timeoutMs);
-      await context.report.attempt(report);
+      let report: AttemptReport;
+
+      if (existing) {
+        report = {
+          attemptNumber: existing.attemptNumber,
+          eventId: existing.eventId,
+          httpStatus: existing.httpStatus ?? undefined,
+          outcome: existing.outcome,
+          durationMs: existing.durationMs,
+          errorDetail: existing.errorDetail ?? undefined,
+        };
+      } else {
+        await setReceiverFault(receiver, { mode: 'delay', delayMs });
+        const event = this.makeEvent(context);
+        const result = await deliverDemoEvent(receiver, event, 1, context.params.timeoutMs);
+        report = result.report;
+        await context.report.attempt(report);
+      }
 
       return await this.finalizeVerdict(context, [
         {
@@ -172,5 +209,6 @@ export class ReceiverFaultExecutor implements ScenarioExecutor, OnModuleInit {
     };
   }
 }
+
 
 

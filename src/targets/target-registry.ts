@@ -15,6 +15,18 @@ function normalize(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
+/** Treat loopback spellings as equivalent and ignore trailing slashes. */
+function canonicalTarget(value: string): string {
+  const url = new URL(value);
+  if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname)) {
+    url.hostname = '127.0.0.1';
+  }
+  url.pathname = url.pathname.replace(/\/+$/, '');
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/, '');
+}
+
 /** Literal private/loopback/link-local host detection. */
 export function isPrivateHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
@@ -109,7 +121,7 @@ export async function resolveJobTarget(params: RunJobParams): Promise<JobTarget>
   const demoUrl = normalize(process.env.DEMO_RECEIVER_URL ?? 'http://127.0.0.1:3100');
 
   if (params.targetName === DEMO_TARGET_NAME) {
-    if (normalize(params.targetUrl) !== demoUrl) {
+    if (canonicalTarget(params.targetUrl) !== canonicalTarget(demoUrl)) {
       throw new Error('Job target URL does not match the configured demo receiver');
     }
     return {
@@ -125,7 +137,7 @@ export async function resolveJobTarget(params: RunJobParams): Promise<JobTarget>
   if (!entry) {
     throw new Error(`Unknown or disabled target "${params.targetName}"`);
   }
-  if (normalize(entry.url) !== normalize(params.targetUrl)) {
+  if (canonicalTarget(entry.url) !== canonicalTarget(params.targetUrl)) {
     throw new Error('Job target URL does not match the allowlisted target');
   }
   const hostname = new URL(entry.url).hostname;
@@ -140,3 +152,4 @@ export async function resolveJobTarget(params: RunJobParams): Promise<JobTarget>
     allowPrivate: entry.allowPrivate,
   };
 }
+

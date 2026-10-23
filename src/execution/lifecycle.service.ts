@@ -6,6 +6,7 @@ import {
   ControlApiError,
   FinalizeReport,
 } from '../control-api/control-api.client';
+import { RecordedAttempt } from './executor';
 import { ExecutorRegistry } from './executor-registry';
 import { RunJob } from '../jobs/run-job';
 
@@ -54,9 +55,17 @@ export class LifecycleService {
       return claim;
     }
     if (claim.outcome === 'conflict') {
-      return this.handleClaimConflict(job.runId, claim);
+      return this.handleClaimConflict(job, claim);
     }
 
+    return this.executeRun(job);
+  }
+
+  /** Execute the scenario (optionally resuming recorded attempts) and finalize. */
+  private async executeRun(
+    job: RunJob,
+    resumeAttempts?: RecordedAttempt[],
+  ): Promise<ProcessOutcome> {
     let finalReport: FinalizeReport;
     const heartbeat = setInterval(() => {
       void this.client
@@ -80,6 +89,7 @@ export class LifecycleService {
         runId: job.runId,
         scenario: job.scenario,
         params: job.params,
+        resumeAttempts,
         report: {
           attempt: (report) => this.client.recordAttempt(job.runId, report),
           assertion: (report) => this.client.recordAssertion(job.runId, report),
@@ -131,9 +141,10 @@ export class LifecycleService {
    * executed and must be left alone.
    */
   private async handleClaimConflict(
-    runId: string,
+    job: RunJob,
     conflict: Extract<ClaimOutcome, { outcome: 'conflict' }>,
   ): Promise<ProcessOutcome> {
+    const runId = job.runId;
     if (TERMINAL_STATUSES.has(conflict.status)) {
       this.logger.warn(`Duplicate job for finished run ${runId} (${conflict.status}); ignoring`);
       return { action: 'ack' };
@@ -152,26 +163,24 @@ export class LifecycleService {
       return { action: 'ack' };
     }
 
-    this.logger.warn(`Run ${runId} lease expired; attempting recovery finalize`);
-    for (let attempt = 1; attempt <= FINALIZE_ATTEMPTS; attempt++) {
-      try {
-        const recovered = await this.client.recover(runId);
-        if (recovered) {
-          return { action: 'ack' };
-        }
+    try {
+      const resumed = await this.client.resumeClaim(runId, this.workerId);
+      if (!resumed) {
+        this.logger.warn(`Run ${runId} could not be resumed (claimed or finished elsewhere)`);
         return { action: 'ack' };
-      } catch (error) {
-        const retryable = error instanceof ControlApiError ? error.retryable : true;
-        if (!retryable) {
-          return { action: 'dead-letter', reason: safeMessage(error) };
-        }
-        if (attempt === FINALIZE_ATTEMPTS) {
-          return { action: 'retry', reason: safeMessage(error) };
-        }
-        await sleep(200 * attempt);
       }
+      const progress = await this.client.getProgress(runId);
+      this.logger.warn(
+        `Resuming run ${runId} from ${progress.attempts.length} recorded attempt(s)`,
+      );
+      return this.executeRun(job, progress.attempts);
+    } catch (error) {
+      const retryable = error instanceof ControlApiError ? error.retryable : true;
+      this.logger.error(`Resume failed for run ${runId}: ${safeMessage(error)}`);
+      return retryable
+        ? { action: 'retry', reason: safeMessage(error) }
+        : { action: 'dead-letter', reason: safeMessage(error) };
     }
-    return { action: 'retry', reason: 'recovery retries exhausted' };
   }
 
   private async finalizeWithRetry(runId: string, report: FinalizeReport): Promise<ProcessOutcome> {
@@ -205,3 +214,4 @@ export class LifecycleService {
 function safeMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
 }
+
