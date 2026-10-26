@@ -9,6 +9,7 @@ import {
   DuplicateDeliveryExecutor,
 } from '../src/scenarios/duplicate-delivery.executor';
 import { parseRunJob } from '../src/jobs/run-job';
+import { isPrivateHost } from '../src/targets/target-registry';
 
 interface RecordedRequest {
   method: string;
@@ -366,6 +367,61 @@ describe('duplicate_delivery executor (e2e)', () => {
     expect(parseRunJob({ ...valid, params: { ...valid.params, httpStatus: 200 } })).toBeNull();
     expect(parseRunJob({ ...valid, params: { ...valid.params, delayMs: 60000 } })).toBeNull();
   });
+});
+
+describe('isPrivateHost (egress guard)', () => {
+  const privates = [
+    'localhost',
+    'sub.localhost',
+    'host.local',
+    '127.0.0.1',
+    '10.0.0.1',
+    '172.16.0.1',
+    '192.168.1.1',
+    '169.254.169.254',
+    '0.0.0.0',
+    // IPv6 loopback / unspecified / link-local / unique-local (bracketed + bare).
+    '[::1]',
+    '::1',
+    '[::]',
+    '::',
+    '[fe80::1]',
+    'fe80::1',
+    '[fc00::1]',
+    'fc00::1',
+    // IPv4-mapped and IPv4-compatible IPv6 smuggling a private IPv4.
+    '[::ffff:127.0.0.1]',
+    '::ffff:127.0.0.1',
+    '[::ffff:10.0.0.1]',
+    '::ffff:10.0.0.1',
+    '[::ffff:169.254.169.254]',
+    '::ffff:169.254.169.254',
+    '[::127.0.0.1]',
+    '::127.0.0.1',
+  ];
+
+  const publics = [
+    'example.com',
+    'api.github.com',
+    '93.184.216.34',
+    '1.1.1.1',
+    '8.8.8.8',
+    '[2606:4700:4700::1111]',
+    '2606:4700:4700::1111',
+    '[::ffff:8.8.8.8]',
+    '::ffff:8.8.8.8',
+  ];
+
+  for (const host of privates) {
+    it(`flags ${host} as private`, () => {
+      expect(isPrivateHost(host)).toBe(true);
+    });
+  }
+  for (const host of publics) {
+    it(`does not flag ${host} as private`, () => {
+      expect(isPrivateHost(host)).toBe(false);
+    });
+  }
 });
 
 
